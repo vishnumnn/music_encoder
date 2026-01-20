@@ -6,13 +6,11 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 
 
-from src.preprocessing.models.dbcqt_group import DBCQTGroup
-
 SAMPLE_RATE = 22050
 COL_COUNT = 5160
 DURATION = 2
-FREQ = 84
-DB_SCALE_CONST = 4
+FREQ = 42
+DB_SCALE_CONST = 2
 
 def mp3s_in_dir(raw_dir):
     paths = []
@@ -20,12 +18,21 @@ def mp3s_in_dir(raw_dir):
         paths.append(path)
     return paths
 
-def ret_ups(running_sps, current_step_count, song_length_s):
-    steps_per_s = current_step_count / song_length_s
+def ret_ups(running_sps, steps_per_s):
     if running_sps is None or running_sps == steps_per_s:
         return running_sps
     print(f"Current steps per second {steps_per_s} != running steps per second {running_sps}")
     raise
+
+def steps_per_second(step_count, song_length_s):
+    return step_count / song_length_s
+
+def steps_per_duration(steps_per_s, duration):
+    return int(steps_per_s * duration)
+
+def cutoff_idx_for_cqt(step_count, steps_per_s, duration):
+    steps_per_d = steps_per_duration(steps_per_s, duration)
+    return (step_count // steps_per_d) * steps_per_d
 
 def power_cqt_from_path(path: str):
     y, sr = librosa.load(path, sr=SAMPLE_RATE, duration=None)
@@ -33,20 +40,29 @@ def power_cqt_from_path(path: str):
     return cqt_amp
 
 def dbcqts_from_paths(paths: list[str]) -> list[np.ndarray]:
-    dbcqts = []
+    dbcqts: list[np.ndarray] = []
     running_sps = None
-    for path in paths:
-        print(f"============ Processing {path} ============")
+    steps_per_d = None
+    print(f"============ Creating DB CQTs from Raw MP3 data ============")
+    for i, path in enumerate(paths):
+        print(f"({i})", f"Processing song at {path}")
         song_length_s = int(librosa.get_duration(path=path))
         cqt = power_cqt_from_path(path=path)
-
         print("Song Duration: ", song_length_s, "CQT Shape: ", cqt.shape)
-        running_sps = ret_ups(running_sps=running_sps, current_step_count=cqt.shape[1], song_length_s=song_length_s)
+        steps_per_s = steps_per_second(cqt.shape[1], song_length_s)
+        steps_per_d = steps_per_duration(steps_per_s, DURATION)
+        running_sps = ret_ups(running_sps=running_sps, steps_per_s=steps_per_s)
         dbcqt = librosa.amplitude_to_db(cqt, ref=DB_SCALE_CONST)
-        print("=========================")
-        dbcqts.append(dbcqt)
+        cutoff = cutoff_idx_for_cqt(step_count=dbcqt.shape[1], steps_per_s=steps_per_s, duration=DURATION)
+        dbcqts.append(dbcqt[:, 0:cutoff])
+        print("Resizing CQT based on steps_per_second")
+        print("steps_per_second:", steps_per_s)
+        print("steps_per_duration:", steps_per_d)
+        print("New CQT Shape:", dbcqts[-1].shape)
+        print("--------------------------------------")
         break
-    return dbcqts
+    print(f"============ Finished creating DB CQTs from Raw MP3 Data ============")
+    return dbcqts, steps_per_d
 
 def steps_per_cqt(dbcqts: list[np.ndarray]):
     return [
@@ -54,7 +70,7 @@ def steps_per_cqt(dbcqts: list[np.ndarray]):
     ]
 
 def standardized_dataset(dbcqts: list[np.ndarray]):
-    print("========= Standardizing DB CQT Dataset =========")
+    print("============ Standardizing DB CQT Dataset ============")
     steps_for_cqt: list[int] = steps_per_cqt(dbcqts)
     freq_buckets = dbcqts[0].shape[0]
     combined_dataset = np.zeros(shape=(freq_buckets, sum(steps_for_cqt)))
@@ -72,6 +88,7 @@ def standardized_dataset(dbcqts: list[np.ndarray]):
     scaler = StandardScaler()
     standardized_data = scaler.fit_transform(transposed_view)
     print(f"Returning standardized combined dataset, shape: {transposed_view.shape}")
+    print("============ Finished standardizing DB CQT Dataset ============")
     return standardized_data
     
 
@@ -82,38 +99,41 @@ def histogram_for_freq(samples):
     plt.title('Histogram of Amplitudes')
     plt.show()
 
-def save_data(dest_file: str, core_dataset: np.ndarray, samples_for_each_song: list[int], steps_per_second: int):
+def save_data(
+    dest_file: str,
+    core_dataset: np.ndarray,
+    samples_for_each_song: list[int],
+    steps_per_second: int,
+    freq_buckets: int,
+):
+    print(f"Saving data to {dest_file}.npz ...")
     np.savez_compressed(
         dest_file,
         core_dataset=core_dataset,
         steps_persamples_for_each_song_song=np.array(samples_for_each_song),
-        steps_per_second=np.array([steps_per_second])
+        steps_per_second=np.array([steps_per_second]),
+        freq_buckets=freq_buckets,
+        allow_pickle=False,
     )
 
 def clean_and_store_data(dest_file_path, raw_data_dir):
     paths: list[str] = mp3s_in_dir(raw_data_dir)
-    dbcqts = dbcqts_from_paths(paths=paths)
+    dbcqts, steps_per_d = dbcqts_from_paths(paths=paths)
     samples_for_each_song = steps_per_cqt(dbcqts)
     dataset = standardized_dataset(dbcqts=dbcqts)
-    steps_per_second = dataset.shape[0]
+    print(f"============ Reshaping after standardization to {DURATION} second intervals ============")
+    print("Steps per duration:", steps_per_d)
+    new_dataset = dataset.reshape((int(dataset.shape[0] / steps_per_d), int(steps_per_d * dataset.shape[1])))
+    print("New dataset shape", new_dataset.shape)
+    print(f"============ Finished reshaping ============")
     save_data(
         dest_file=dest_file_path,
-        core_dataset=dataset,
+        core_dataset=new_dataset,
         samples_for_each_song=samples_for_each_song,
-        steps_per_second=steps_per_second
+        steps_per_duration=steps_per_d,
+        freq_buckets=FREQ,
     )
 
-# def clean_data():
-#     paths: list[str] = mp3s_in_dir(DIR)
-#     dbcqts = dbcqts_from_paths(paths=paths)
-#     samples = np.array([])
-#     for db_cqt in dbcqts:
-#         for cqt in db_cqt.cqts:
-#             samples = np.append(samples, cqt[0, :])
-#     db = librosa.amplitude_to_db(samples, ref=np.min)
-#     samples2D = samples.reshape(-1, 1)
-#     scaler = StandardScaler()
-#     standardized_data = scaler.fit_transform(samples2D)
-#     x = standardized_data.reshape(1, -1)[0]
-#     import pdb; pdb.set_trace()
-#     histogram_for_freq(db)
+def retreive_data(source_file_path: str):
+    result = np.load(file=source_file_path)
+    print(len(result))
