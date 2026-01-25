@@ -10,6 +10,8 @@ SAMPLE_RATE = 22050
 COL_COUNT = 5160
 DURATION = 2
 FREQ = 42
+_EXPECTED_STEPS_PER_DURATION = 43
+INPUT_DIM = DURATION * FREQ * _EXPECTED_STEPS_PER_DURATION
 DB_SCALE_CONST = 2
 
 def mp3s_in_dir(raw_dir):
@@ -19,7 +21,7 @@ def mp3s_in_dir(raw_dir):
     return paths
 
 def ret_ups(running_sps, steps_per_s):
-    if running_sps is None or running_sps == steps_per_s:
+    if (running_sps is None or running_sps == steps_per_s) and (steps_per_s == _EXPECTED_STEPS_PER_DURATION):
         return running_sps
     print(f"Current steps per second {steps_per_s} != running steps per second {running_sps}")
     raise
@@ -134,6 +136,6 @@ def clean_and_store_data(dest_file_path, raw_data_dir):
         freq_buckets=FREQ,
     )
 
-def retreive_data(source_file_path: str):
+def retrieve_data(source_file_path: str):
     result = np.load(file=source_file_path)
     print(len(result))
